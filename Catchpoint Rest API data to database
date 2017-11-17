@@ -1,0 +1,242 @@
+//---------------------------------------------------------------------------------------------------------------------------------------------------
+using System;
+using System.Text;
+using System.Net;
+using Newtonsoft.Json;
+using System.IO;
+using System.Collections.Generic;
+using System.Data.SqlClient;
+using System.Data;
+using System.Configuration;
+using System.Threading;
+using System.Linq;
+namespace CatchpointToWatchdog
+{
+    class Program
+    {
+
+        class AuthenticationToken
+        {
+            public string token_type { get; set; }
+            public string expires_in { get; set; }
+            public string access_token { get; set; }
+        }
+
+        static void Main(string[] args)
+        {
+            string fromDate = "";
+            string toDate = "";
+            int syntheticIdArgument = 0;
+
+            if (args.Length != 0)
+            {
+                DateTime dateToProcess;
+                if (DateTime.TryParse(args[0], out dateToProcess).Equals(true))
+                {
+                    fromDate = dateToProcess.ToString("MM-dd-yyyy 00:00");
+                    toDate = dateToProcess.AddDays(1).ToString("MM-dd-yyyy 00:00");
+                }
+                else
+                {
+                    Console.Write("Invalid date passed in: " + args[0].ToString());
+                    Environment.Exit(1);
+                }
+                if (args.Length > 1)
+                {
+                    int.TryParse(args[1], out syntheticIdArgument);
+                }
+            }
+            else
+            {
+                fromDate = DateTime.Now.AddDays(-1).ToString("MM-dd-yyyy 00:00");
+                toDate = DateTime.Now.ToString("MM-dd-yyyy 00:00");
+            }
+            Console.WriteLine("Retrieving data between " + fromDate + " and " + toDate);
+            string url = "https://io.catchpoint.com/ui/api/token";
+
+            SqlConnection connWatchdog = new SqlConnection(ConfigurationManager.ConnectionStrings["connection"].ConnectionString.ToString());
+            SqlConnection connWatchdogInserts = new SqlConnection(ConfigurationManager.ConnectionStrings["connection"].ConnectionString.ToString());
+            conn.Open();
+            connInserts.Open();
+            SqlCommand cmdGetSynthetics = new SqlCommand("[stp_AM_SEL_AvailabilitySynthetics]", conn);
+            cmdGetSynthetics.CommandType = CommandType.StoredProcedure;
+            //If synthetic id was passed in then add it as parameter as we'll process only for one synthetic
+            if (syntheticIdArgument != 0)
+            {
+                cmdGetSynthetics.Parameters.Add(new SqlParameter("@SyntheticId", SqlDbType.Int));
+                cmdGetSynthetics.Parameters["@SyntheticId"].Value = syntheticIdArgument;
+            }
+
+            SqlDataReader rdrSynthetics = cmdGetSynthetics.ExecuteReader();
+
+            while (rdrSynthetics.Read())
+            {
+                string syntheticId = rdrSynthetics["AC_SyntheticId"].ToString();
+                string synthetidDescription = rdrSynthetics["AC_Description"].ToString();
+                Console.WriteLine("Retrieving for synthetic: " + synthetidDescription);
+
+                //Loop 3 times in case first attempts to hit API fail
+                for (int k = 0; k < 3; k++)
+                {
+                    try
+                    {
+                        string urlGet = @"https://io.catchpoint.com/ui/api/v1/performance/raw/" + syntheticId + "?" + "startTime=" + fromDate + "&" + "endTime=" + toDate;
+                        // Create the data to send
+                        StringBuilder data = new StringBuilder();
+                        data.Append("grant_type=" + Uri.EscapeDataString("client_credentials"));
+                        data.Append("&client_id=" + Uri.EscapeDataString(ConfigurationManager.AppSettings["client_id"]));
+                        data.Append("&client_secret=" + Uri.EscapeDataString(ConfigurationManager.AppSettings["client_secret"]));
+
+                        // Create a byte array of the data to be sent
+                        byte[] byteArray = Encoding.UTF8.GetBytes(data.ToString());
+                        // Setup the Request
+                        HttpWebRequest request = (HttpWebRequest)WebRequest.Create(url);
+                        request.Method = "POST";
+                        request.Accept = "application/json";
+                        request.ContentType = "application/x-www-form-urlencoded";
+                        request.ContentLength = byteArray.Length;
+
+                        // Write data
+                        Stream postStream = request.GetRequestStream();
+                        postStream.Write(byteArray, 0, byteArray.Length);
+                        postStream.Close();
+
+                        // Send Request & Get Response
+                        HttpWebResponse response = (HttpWebResponse)request.GetResponse();
+
+                        // Get the Response Stream
+                        StreamReader reader = new StreamReader(response.GetResponseStream());
+                        string json = reader.ReadLine();
+
+                        AuthenticationToken t = new AuthenticationToken();
+
+                        t = JsonConvert.DeserializeObject<AuthenticationToken>(json);
+                        // Retrieve and Return the Access Token
+                        StringBuilder data2 = new StringBuilder();
+                        data2.Append("Authorization=" + t.access_token);
+
+                        byte[] byteArray2 = Encoding.UTF8.GetBytes(data2.ToString());
+
+                        HttpWebRequest request2 = (HttpWebRequest)WebRequest.Create(urlGet);
+                        request2.Method = "GET";
+                        request2.ContentType = "application/x-www-form-urlencoded";
+                        request2.PreAuthenticate = true;
+                        request2.Headers.Add("Authorization", "Bearer " + Convert.ToBase64String(Encoding.UTF8.GetBytes(t.access_token.ToString())));
+                        request2.Proxy.Credentials = System.Net.CredentialCache.DefaultCredentials;
+                        request2.Accept = "application/json";
+
+                        // Send Request & Get Response
+                        HttpWebResponse response2 = (HttpWebResponse)request2.GetResponse();
+
+                        // Get the Response Stream
+                        StreamReader reader2 = new StreamReader(response2.GetResponseStream());
+                        string json2 = reader2.ReadLine();
+
+                        //Convert string to json objects                                                                                                                
+                        dynamic obj = JsonConvert.DeserializeObject(json2);
+                        int i = 0;
+                        int j = 0;
+                        int previousResponse_time = 0;
+                        int responsetime_total = 0;
+                        DateTime now = DateTime.Now;
+
+                        SqlCommand cmd = new SqlCommand("[stp_AM_INS_AvailabilityMonitoring]", connInserts);
+                        List<string> syntheticMetricNames = new List<string>();
+
+                        if (obj.detail != null)
+                        {
+                            foreach (var json1obj in obj.detail.fields.synthetic_metrics)
+                            {
+                                syntheticMetricNames.Add((obj.detail.fields.synthetic_metrics[j].name).ToString());
+                                j++;
+                            }
+                        }
+
+                        if (obj.detail != null)
+                        {
+                            foreach (var json2obj in obj.detail.items)
+                            {
+                                List<object> syntheticMetricsvalues = new List<object>();
+                                int s = 0;
+                                
+                                while (s < syntheticMetricNames.Count)
+                                {
+                                    syntheticMetricsvalues.Add(obj.detail.items[i].synthetic_metrics[s]);
+                                    if (s == syntheticMetricNames.Count)
+                                    {
+                                        break;
+                                    }
+                                    s++;
+                                }
+                                Dictionary<string, object> dictionary = new Dictionary<string, object>();
+                                dictionary = syntheticMetricNames.Zip(syntheticMetricsvalues, (l, v) => new { l, v }).ToDictionary(x => x.l, x => x.v);
+
+                                cmd.Parameters.Clear();
+                                cmd.CommandType = CommandType.StoredProcedure;
+                                cmd.Parameters.Add(new SqlParameter("@SyntheticId", SqlDbType.Int));
+                                cmd.Parameters.Add(new SqlParameter("@TransactionDate", SqlDbType.DateTime));                             
+                                cmd.Parameters.Add(new SqlParameter("@ResponseTime", SqlDbType.Int));
+                                cmd.Parameters.Add(new SqlParameter("@Success", SqlDbType.Bit));
+                                cmd.Parameters["@SyntheticId"].Value = obj.detail.items[i].breakdown_1.id;
+
+                                DateTime CurrentDate = obj.detail.items[i].dimension.name;
+                                DateTime localDateTime = CurrentDate.ToLocalTime();
+                                cmd.Parameters["@TransactionDate"].Value = localDateTime;
+
+                                var responseTime = dictionary["Response (ms)"];
+                                if (CurrentDate == now)
+                                {
+                                    responsetime_total = Convert.ToInt32(responseTime) + previousResponse_time;
+                                }
+                                else
+                                {
+                                    responsetime_total = 0;
+                                    previousResponse_time = 0;
+                                }
+                                now = CurrentDate;
+                                previousResponse_time = Convert.ToInt32(responseTime) + previousResponse_time;
+                           
+                                
+                                cmd.Parameters["@ResponseTime"].Value = Convert.ToInt32(responseTime);
+                                var responseFailuresdic = dictionary["# Response Failures"];
+                                int? convertedReponseFailure = responseFailuresdic as int?;
+
+                                if (convertedReponseFailure != null)
+                                {
+                                    cmd.Parameters["@Success"].Value = 0;
+
+                                }
+                                else
+                                {
+                                    cmd.Parameters["@Success"].Value = 1;
+
+                                }
+                                cmd.ExecuteNonQuery();
+                                i++;
+                            }
+                        }
+                        else
+                        {
+                            Console.WriteLine("No Data for this day for this synthetic");
+                        }
+                        //If pull was successful then break
+                        break;
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine(ex.ToString());
+                        Thread.Sleep(120000);
+
+                         if (k >= 2)
+                        {
+                            throw;
+                        }
+                    }
+                }
+            }
+            rdrSynthetics.Close();
+            conn.Close();
+            conInserts.Close();
+        }
+    }
+}
