@@ -10,7 +10,7 @@ using System.Data;
 using System.Configuration;
 using System.Threading;
 using System.Linq;
-namespace CatchpointToWatchdog
+namespace CatchpointTodb
 {
     class Program
     {
@@ -54,8 +54,8 @@ namespace CatchpointToWatchdog
             Console.WriteLine("Retrieving data between " + fromDate + " and " + toDate);
             string url = "https://io.catchpoint.com/ui/api/token";
 
-            SqlConnection connWatchdog = new SqlConnection(ConfigurationManager.ConnectionStrings["connection"].ConnectionString.ToString());
-            SqlConnection connWatchdogInserts = new SqlConnection(ConfigurationManager.ConnectionStrings["connection"].ConnectionString.ToString());
+            SqlConnection conn= new SqlConnection(ConfigurationManager.ConnectionStrings["connection"].ConnectionString.ToString());
+            SqlConnection connInserts = new SqlConnection(ConfigurationManager.ConnectionStrings["connection"].ConnectionString.ToString());
             conn.Open();
             connInserts.Open();
             SqlCommand cmdGetSynthetics = new SqlCommand("[stp_AM_SEL_AvailabilitySynthetics]", conn);
